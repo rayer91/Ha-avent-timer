@@ -1,0 +1,6 @@
+{
+  "name": "Philips Avent Cumisüveg Időzítő és Kalkulátor",
+  "description": "Időzítés és beállítás kalkulátor Philips Avent cumisüveg-melegítőhöz anyatejhez és tápszerhez, beépített visszaszámlálóval.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
