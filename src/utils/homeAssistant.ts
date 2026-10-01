@@ -20,24 +20,50 @@ export interface HAStatusResponse {
 }
 
 /**
+ * Returns the correct base URL for API requests.
+ * In Home Assistant Ingress, the browser pathname starts with /api/hassio_ingress/<token>/
+ * Standard relative fetches without this prefix get intercepted by the root Home Assistant origin (port 8123)
+ * resulting in 404 Not Found. This helper extracts the active Ingress prefix.
+ */
+export function getApiBaseUrl(): string {
+  if (typeof window === 'undefined') return '';
+  const pathname = window.location.pathname || '';
+  const ingressIdx = pathname.indexOf('/api/hassio_ingress/');
+  if (ingressIdx !== -1) {
+    const sub = pathname.substring(ingressIdx);
+    const parts = sub.split('/');
+    if (parts.length >= 4) {
+      return parts.slice(0, 4).join('/');
+    }
+  }
+  return '';
+}
+
+/**
  * Checks if the app is currently running as a Home Assistant Add-on with Supervisor API access
  */
 export async function checkHomeAssistantStatus(): Promise<HAStatusResponse> {
   try {
-    const res = await fetch('/api/ha/status');
+    const baseUrl = getApiBaseUrl();
+    const res = await fetch(`${baseUrl}/api/ha/status`);
     if (!res.ok) return { inHomeAssistant: false, supervisorOnline: false };
-    return await res.json();
+    const data = await res.json();
+    return {
+      inHomeAssistant: Boolean(data.inHomeAssistant),
+      supervisorOnline: Boolean(data.supervisorOnline),
+    };
   } catch {
     return { inHomeAssistant: false, supervisorOnline: false };
   }
 }
 
 /**
- * Fetches all switch entities from Home Assistant via the Supervisor API
+ * Fetches all switch and plug entities from Home Assistant via the Supervisor API
  */
 export async function fetchHomeAssistantSwitches(): Promise<HASwitchEntity[]> {
   try {
-    const res = await fetch('/api/ha/switches');
+    const baseUrl = getApiBaseUrl();
+    const res = await fetch(`${baseUrl}/api/ha/switches`);
     if (!res.ok) return [];
     const data = await res.json();
     return data.entities || [];
@@ -47,29 +73,31 @@ export async function fetchHomeAssistantSwitches(): Promise<HASwitchEntity[]> {
 }
 
 /**
- * Directly control a switch via the internal Supervisor API
+ * Directly control a switch or plug via the internal Supervisor API
  */
 export async function setSwitchStateDirectly(
   entityId: string,
   turnOn: boolean
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    const endpoint = turnOn ? '/api/ha/switch/turn_on' : '/api/ha/switch/turn_off';
+    const baseUrl = getApiBaseUrl();
+    const endpoint = turnOn ? `${baseUrl}/api/ha/switch/turn_on` : `${baseUrl}/api/ha/switch/turn_off`;
     const res = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ entity_id: entityId }),
     });
     const data = await res.json();
-    return { success: data.success, error: data.error };
+    return { success: Boolean(data.success), error: data.error };
   } catch (err: any) {
-    return { success: false, error: err?.message || 'Hálózati hiba' };
+    return { success: false, error: err?.message || 'Hálózati hiba a vezérlés során' };
   }
 }
 
 /**
- * Universal dispatcher: uses direct Supervisor API if available in Add-on mode,
- * otherwise falls back to Webhook mode.
+ * Universal dispatcher:
+ * - Direct Home Assistant API mode: used whenever an entityId is selected or in Add-on environment (NO WEBHOOK REQUIRED!)
+ * - Webhook mode: used ONLY if an explicit Webhook URL is provided by the user.
  */
 export async function triggerHomeAssistantDevice(
   config: HomeAssistantConfig,
@@ -79,20 +107,22 @@ export async function triggerHomeAssistantDevice(
     milkType: MilkType;
     durationSeconds: number;
   },
-  isDirectSupervisor: boolean = false
+  _isDirectSupervisor?: boolean
 ): Promise<{ success: boolean; error?: string }> {
   if (!config.enabled) {
     return { success: false, error: 'A Home Assistant integráció ki van kapcsolva.' };
   }
 
-  // 1. Direct Supervisor API Mode (Inside Home Assistant Add-on)
-  if (isDirectSupervisor && config.entityId) {
-    const shouldTurnOn = event === 'start';
+  const shouldTurnOn = event === 'start';
+
+  // 1. Direct Control via Home Assistant Entity ID (Default & Recommended Path!)
+  if (config.entityId) {
     const directResult = await setSwitchStateDirectly(config.entityId, shouldTurnOn);
 
-    // Also send an in-app notification if finished
+    // If successfully finished, also request a friendly in-app Home Assistant notification
     if (event === 'finish' && directResult.success) {
-      fetch('/api/ha/notify', {
+      const baseUrl = getApiBaseUrl();
+      fetch(`${baseUrl}/api/ha/notify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -102,15 +132,20 @@ export async function triggerHomeAssistantDevice(
       }).catch(() => {});
     }
 
-    return directResult;
+    if (directResult.success || !config.webhookUrl) {
+      return directResult;
+    }
   }
 
-  // 2. Webhook Fallback Mode (For external access)
-  if (config.webhookUrl) {
+  // 2. Webhook Mode (ONLY used if an explicit Webhook URL is actually configured!)
+  if (config.webhookUrl && config.webhookUrl.trim() !== '') {
     return sendHomeAssistantWebhook(config, event, details);
   }
 
-  return { success: false, error: 'Nincs beállítva entitás vagy Webhook URL.' };
+  return {
+    success: false,
+    error: 'Kérlek válaszd ki a vezérelni kívánt konnektort (Entity ID) a beállításokban!',
+  };
 }
 
 export async function sendHomeAssistantWebhook(
@@ -122,8 +157,8 @@ export async function sendHomeAssistantWebhook(
     durationSeconds: number;
   }
 ): Promise<{ success: boolean; error?: string }> {
-  if (!config.enabled || !config.webhookUrl) {
-    return { success: false, error: 'Home Assistant integráció nincs bekapcsolva vagy nincs webhook URL megadva.' };
+  if (!config.enabled || !config.webhookUrl || config.webhookUrl.trim() === '') {
+    return { success: false, error: 'Nincs megadva Webhook URL.' };
   }
 
   try {
@@ -154,12 +189,12 @@ export async function sendHomeAssistantWebhook(
     return { success: true };
   } catch (err: any) {
     console.warn('Home Assistant webhook trigger failed:', err);
-    return { success: false, error: err?.message || 'Hálózati hiba a Home Assistant elérésekor' };
+    return { success: false, error: err?.message || 'Hálózati hiba a Home Assistant Webhook elérésekor' };
   }
 }
 
 /**
- * Generates ready-to-copy Home Assistant YAML automation code for Tapo plug integration.
+ * Generates ready-to-copy Home Assistant YAML automation code for Tapo plug integration (optional webhook fallback).
  */
 export function generateHomeAssistantAutomationYaml(webhookId: string = 'avent_warmer', tapoEntity: string = 'switch.tapo_cumisuveg_melegito'): string {
   return `alias: "Avent Melegítő & Tapo Konnektor Automatikus Vezérlés"
@@ -178,7 +213,7 @@ action:
           - condition: template
             value_template: "{{ trigger.json.event == 'start' }}"
         sequence:
-          - service: switch.turn_on
+          - service: homeassistant.turn_on
             target:
               entity_id: ${tapoEntity}
           - service: notify.notify
@@ -191,7 +226,7 @@ action:
           - condition: template
             value_template: "{{ trigger.json.event == 'finish' }}"
         sequence:
-          - service: switch.turn_off
+          - service: homeassistant.turn_off
             target:
               entity_id: ${tapoEntity}
           - service: notify.notify

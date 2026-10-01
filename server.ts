@@ -44,8 +44,7 @@ app.get('/api/ha/status', async (_req, res) => {
 });
 
 /**
- * Fetch all available switch entities directly from Home Assistant
- * No webhook or token configuration needed by user!
+ * Fetch all available switch, plug, and outlet entities directly from Home Assistant Core
  */
 app.get('/api/ha/switches', async (_req, res) => {
   if (!SUPERVISOR_TOKEN) {
@@ -73,13 +72,23 @@ app.get('/api/ha/switches', async (_req, res) => {
     }
 
     const states = await response.json();
-    // Filter only switch entities (e.g. switch.tapo_p100, switch.cumisuveg_melegito)
+    // Filter switch, outlet, and plug entities (e.g. switch.tapo_p100, switch.cumisuveg_melegito, etc.)
     const switches = (states as any[])
-      .filter((entity) => entity.entity_id.startsWith('switch.'))
+      .filter((entity) => {
+        const id = entity.entity_id || '';
+        const devClass = entity.attributes?.device_class || '';
+        return (
+          id.startsWith('switch.') ||
+          id.startsWith('input_boolean.') ||
+          devClass === 'outlet' ||
+          devClass === 'switch' ||
+          id.toLowerCase().includes('tapo')
+        );
+      })
       .map((entity) => ({
         entity_id: entity.entity_id,
         name: entity.attributes?.friendly_name || entity.entity_id,
-        state: entity.state, // 'on' | 'off' | 'unavailable'
+        state: entity.state || 'off', // 'on' | 'off' | 'unavailable'
       }))
       .sort((a, b) => {
         // Prioritize Tapo switches first in sorting
@@ -90,21 +99,14 @@ app.get('/api/ha/switches', async (_req, res) => {
         return a.name.localeCompare(b.name);
       });
 
-    res.json({
-      success: true,
-      entities: switches,
-    });
+    res.json({ success: true, entities: switches });
   } catch (err: any) {
-    res.status(500).json({
-      success: false,
-      error: err?.message || 'Failed to communicate with Home Assistant Core API',
-      entities: [],
-    });
+    res.status(500).json({ success: false, error: err?.message, entities: [] });
   }
 });
 
 /**
- * Directly turn ON a switch in Home Assistant
+ * Directly turn ON a switch / plug in Home Assistant using universal homeassistant service
  */
 app.post('/api/ha/switch/turn_on', async (req, res) => {
   const { entity_id } = req.body;
@@ -113,11 +115,12 @@ app.post('/api/ha/switch/turn_on', async (req, res) => {
   }
 
   if (!SUPERVISOR_TOKEN) {
-    return res.status(400).json({ success: false, error: 'SUPERVISOR_TOKEN not present' });
+    return res.status(400).json({ success: false, error: 'SUPERVISOR_TOKEN not present in add-on environment' });
   }
 
   try {
-    const response = await fetch(`${SUPERVISOR_URL}/core/api/services/switch/turn_on`, {
+    // homeassistant.turn_on service universally supports switches, plugs, lights, and outlets!
+    const response = await fetch(`${SUPERVISOR_URL}/core/api/services/homeassistant/turn_on`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${SUPERVISOR_TOKEN}`,
@@ -126,14 +129,25 @@ app.post('/api/ha/switch/turn_on', async (req, res) => {
       body: JSON.stringify({ entity_id }),
     });
 
-    res.json({ success: response.ok, status: response.status });
+    const rawText = await response.text();
+    let data: any = {};
+    try { data = JSON.parse(rawText); } catch {}
+
+    if (!response.ok) {
+      return res.status(response.status).json({
+        success: false,
+        error: data?.message || rawText || `Home Assistant error code: ${response.status}`,
+      });
+    }
+
+    res.json({ success: true, status: response.status });
   } catch (err: any) {
-    res.status(500).json({ success: false, error: err?.message });
+    res.status(500).json({ success: false, error: err?.message || 'Hálózati hiba a Supervisor felé' });
   }
 });
 
 /**
- * Directly turn OFF a switch in Home Assistant
+ * Directly turn OFF a switch / plug in Home Assistant using universal homeassistant service
  */
 app.post('/api/ha/switch/turn_off', async (req, res) => {
   const { entity_id } = req.body;
@@ -142,11 +156,12 @@ app.post('/api/ha/switch/turn_off', async (req, res) => {
   }
 
   if (!SUPERVISOR_TOKEN) {
-    return res.status(400).json({ success: false, error: 'SUPERVISOR_TOKEN not present' });
+    return res.status(400).json({ success: false, error: 'SUPERVISOR_TOKEN not present in add-on environment' });
   }
 
   try {
-    const response = await fetch(`${SUPERVISOR_URL}/core/api/services/switch/turn_off`, {
+    // homeassistant.turn_off service universally supports switches, plugs, lights, and outlets!
+    const response = await fetch(`${SUPERVISOR_URL}/core/api/services/homeassistant/turn_off`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${SUPERVISOR_TOKEN}`,
@@ -155,9 +170,20 @@ app.post('/api/ha/switch/turn_off', async (req, res) => {
       body: JSON.stringify({ entity_id }),
     });
 
-    res.json({ success: response.ok, status: response.status });
+    const rawText = await response.text();
+    let data: any = {};
+    try { data = JSON.parse(rawText); } catch {}
+
+    if (!response.ok) {
+      return res.status(response.status).json({
+        success: false,
+        error: data?.message || rawText || `Home Assistant error code: ${response.status}`,
+      });
+    }
+
+    res.json({ success: true, status: response.status });
   } catch (err: any) {
-    res.status(500).json({ success: false, error: err?.message });
+    res.status(500).json({ success: false, error: err?.message || 'Hálózati hiba a Supervisor felé' });
   }
 });
 
